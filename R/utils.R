@@ -34,18 +34,20 @@ set_opts_knit = function(config) {
   config
 }
 
-get_base_format = function(format) {
-  if (is.character(format)) {
-    format = eval(parse(text = format))
-  }
+get_base_format = function(format, options = list()) {
+  if (is.character(format)) format = eval(parse(text = format))
   if (!is.function(format)) stop('The output format must be a function')
-  format
+  # make sure named elements in `options` have corresponding named arguments in
+  # the format function, unless the function has the ... argument
+  nms = names(formals(format))
+  if (!('...' %in% nms)) options = options[names(options) %in% c(nms, '')]
+  do.call(format, options)
 }
 
 load_config = function() {
   if (length(opts$get('config')) == 0 && file.exists('_bookdown.yml')) {
     # store the book config
-    opts$set(config = yaml::yaml.load_file('_bookdown.yml'))
+    opts$set(config = rmarkdown:::yaml_load_file('_bookdown.yml'))
   }
   opts$get('config')
 }
@@ -65,9 +67,7 @@ source_files = function(format = NULL, config = load_config(), all = FALSE) {
     recursive = subdir_yes, full.names = subdir_yes
   ))
   if (length(files2 <- config[['rmd_files']]) > 0) {
-    if (is.list(files2)) {
-      files2 = if (all && is.null(format)) unlist(files2) else files2[[format]]
-    }
+    if (is.list(files2)) files2 = if (all) unlist(files2) else files2[[format]]
     files = if (subdir_yes) c(files2, files) else files2
   } else {
     files = files[grep('^[^_]', basename(files))]  # exclude those start with _
@@ -163,10 +163,23 @@ insert_code_chunk = function(x, before, after) {
 }
 
 insert_chapter_script = function(config, where = 'before') {
-  script = config[[sprintf('%s_chapter_script', where)]]
+  script = get_chapter_script(config, where)
   if (is.character(script)) {
-    c('```{r include=FALSE, cache=FALSE}', unlist(lapply(script, read_utf8)), '```')
+    c('```{r include=FALSE, cache=FALSE}', script, '```')
   }
+}
+
+get_chapter_script = function(config, where) {
+  script = config[[sprintf('%s_chapter_script', where)]]
+  unlist(lapply(script, read_utf8))
+}
+
+merge_chapter_script = function(config, where) {
+  if (!is.character(script <- get_chapter_script(config, where)) || length(script) == 0)
+    return('')
+  f = tempfile(fileext = '.R')
+  write_utf8(script, f)
+  f
 }
 
 check_special_chars = function(filename) {
@@ -184,6 +197,11 @@ Rscript = function(...) xfun::Rscript(...)
 Rscript_render = function(file, ...) {
   args = shQuote(c(bookdown_file('scripts', 'render_one.R'), file, ...))
   if (Rscript(args) != 0) stop('Failed to compile ', file)
+}
+
+source_utf8 = function(file) {
+  if (file == '') return()
+  eval(xfun::parse_only(read_utf8(file)), envir = globalenv())
 }
 
 clean_meta = function(meta_file, files) {
@@ -260,15 +278,18 @@ local_resources = function(x) {
 #' @param in_session Whether to compile the book using the current R session, or
 #'   always open a new R session to compile the book whenever changes occur in
 #'   the book directory.
+#' @param quiet Whether to suppress output (e.g., the knitting progress) in the
+#'   console.
 #' @param ... Other arguments passed to \code{servr::\link[servr]{httw}()} (not
 #'   including the \code{handler} argument, which has been set internally).
 #' @export
 serve_book = function(
-  dir = '.', output_dir = '_book', preview = TRUE, in_session = TRUE, ...
+  dir = '.', output_dir = '_book', preview = TRUE, in_session = TRUE, quiet = FALSE, ...
 ) {
   # when this function is called via the RStudio addin, use the dir of the
   # current active document
-  if (missing(dir) && requireNamespace('rstudioapi', quietly = TRUE)) {
+  if (missing(dir) && requireNamespace('rstudioapi', quietly = TRUE) &&
+      rstudioapi::isAvailable()) {
     path = rstudioapi::getSourceEditorContext()[['path']]
     if (!(is.null(path) || path == '')) dir = dirname(path)
   }
@@ -291,10 +312,11 @@ serve_book = function(
     if (!dir_exists(output_dir)) preview_ = FALSE
     if (in_session) render_book(
       files, output_format, output_dir = output_dir, preview = preview_,
-      envir = globalenv()
+      envir = globalenv(), quiet = quiet
     ) else {
       args = shQuote(c(
-        bookdown_file('scripts', 'servr.R'), output_format, output_dir, preview_, files
+        bookdown_file('scripts', 'servr.R'), output_format, output_dir, preview_,
+        quiet, files
       ))
       if (Rscript(args) != 0) stop('Failed to compile ', paste(files, collapse = ' '))
     }
@@ -355,9 +377,11 @@ existing_r = function(base, first = FALSE) {
   existing_files(x, first)
 }
 
-html_or_latex = function(format) {
-  if (grepl('(html|gitbook|epub)', format)) return('html')
+target_format = function(format) {
+  if (grepl('(html|gitbook)', format)) return('html')
   if (grepl('pdf', format)) return('latex')
+  if (grepl('epub_', format)) return('epub')
+  if (grepl('word_', format)) return('docx')
   switch(format, tufte_book2 = 'latex', tufte_handout2 = 'latex')
 }
 

@@ -13,7 +13,7 @@
 #' the LaTeX output as its input argument, and should return a character vector
 #' to be written to the \file{.tex} output file. This gives you full power to
 #' post-process the LaTeX output.
-#' @param toc,number_sections,fig_caption See
+#' @param toc,number_sections,fig_caption,pandoc_args See
 #'   \code{rmarkdown::\link{pdf_document}}, or the documentation of the
 #'   \code{base_format} function.
 #' @param ... Other arguments to be passed to \code{base_format}.
@@ -32,14 +32,14 @@
 #' @note This output format can only be used with \code{\link{render_book}()}.
 #' @export
 pdf_book = function(
-  toc = TRUE, number_sections = TRUE, fig_caption = TRUE, ...,
+  toc = TRUE, number_sections = TRUE, fig_caption = TRUE, pandoc_args = NULL, ...,
   base_format = rmarkdown::pdf_document, toc_unnumbered = TRUE,
   toc_appendix = FALSE, toc_bib = FALSE, quote_footer = NULL, highlight_bw = FALSE
 ) {
-  base_format = get_base_format(base_format)
-  config = base_format(
-    toc = toc, number_sections = number_sections, fig_caption = fig_caption, ...
-  )
+  config = get_base_format(base_format, list(
+    toc = toc, number_sections = number_sections, fig_caption = fig_caption,
+    pandoc_args = pandoc_args2(pandoc_args), ...
+  ))
   config$pandoc$ext = '.tex'
   post = config$post_processor  # in case a post processor have been defined
   config$post_processor = function(metadata, input, output, clean, verbose) {
@@ -80,7 +80,10 @@ pdf_book = function(
   # always enable tables (use packages booktabs, longtable, ...)
   pre = config$pre_processor
   config$pre_processor = function(...) {
-    c(if (is.function(pre)) pre(...), '--variable', 'tables=yes', '--standalone')
+    c(
+      if (is.function(pre)) pre(...), '--variable', 'tables=yes', '--standalone',
+      if (rmarkdown::pandoc_available('2.7.1')) '-Mhas-frontmatter=false'
+    )
   }
   config$bookdown_output_format = 'latex'
   config = set_opts_knit(config)
@@ -91,6 +94,12 @@ pdf_book = function(
 #' @export
 pdf_document2 = function(...) {
   pdf_book(..., base_format = rmarkdown::pdf_document)
+}
+
+#' @rdname html_document2
+#' @export
+beamer_presentation2 = function(..., number_sections = FALSE) {
+  pdf_book(..., base_format = rmarkdown::beamer_presentation)
 }
 
 #' @rdname html_document2

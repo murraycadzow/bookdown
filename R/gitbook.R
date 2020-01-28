@@ -15,16 +15,19 @@
 #'
 #' @param config A list of configuration options for the gitbook style, such as
 #'   the font/theme settings.
+#' @param table_css \code{TRUE} to load gitbook's default CSS for tables. Choose
+#' \code{FALSE} to unload and use customized CSS (for exmaple, bootstrap) via
+#' the \code{css} option. Default is \code{TRUE}.
 #' @export
 gitbook = function(
   fig_caption = TRUE, number_sections = TRUE, self_contained = FALSE,
   lib_dir = 'libs', pandoc_args = NULL, ..., template = 'default',
   split_by = c('chapter', 'chapter+number', 'section', 'section+number', 'rmd', 'none'),
-  split_bib = TRUE, config = list()
+  split_bib = TRUE, config = list(), table_css = TRUE
 ) {
   html_document2 = function(..., extra_dependencies = list()) {
     rmarkdown::html_document(
-      ..., extra_dependencies = c(extra_dependencies, gitbook_dependency())
+      ..., extra_dependencies = c(extra_dependencies, gitbook_dependency(table_css))
     )
   }
   gb_config = config
@@ -41,11 +44,19 @@ gitbook = function(
   config$post_processor = function(metadata, input, output, clean, verbose) {
     if (is.function(post)) output = post(metadata, input, output, clean, verbose)
     on.exit(write_search_data(), add = TRUE)
+
+    # a hack to remove Pandoc's margin for code blocks since gitbook has already
+    # defined margin on <pre> (there would be too much bottom margin)
+    x = read_utf8(output)
+    x = x[x != 'div.sourceCode { margin: 1em 0; }']
+    write_utf8(x, output)
+
     move_files_html(output, lib_dir)
     output2 = split_chapters(
       output, gitbook_page, number_sections, split_by, split_bib, gb_config, split_by
     )
     if (file.exists(output) && !same_path(output, output2)) file.remove(output)
+    move_files_html(output2, lib_dir)
     output2
   }
   config$bookdown_output_format = 'html'
@@ -62,7 +73,7 @@ gitbook_search = local({
   )
 })
 
-write_search_data = function(x) {
+write_search_data = function() {
   x = gitbook_search$get()
   if (length(x) == 0) return()
   gitbook_search$empty()
@@ -72,19 +83,21 @@ write_search_data = function(x) {
   write_utf8(x, output_path('search_index.json'))
 }
 
-gitbook_dependency = function() {
+gitbook_dependency = function(table_css) {
   assets = bookdown_file('resources', 'gitbook')
   owd = setwd(assets); on.exit(setwd(owd), add = TRUE)
   app = if (file.exists('js/app.min.js')) 'app.min.js' else 'app.js'
   list(jquery_dependency(), htmltools::htmlDependency(
     'gitbook', '2.6.7', src = assets,
     stylesheet = file.path('css', c(
-      'style.css', 'plugin-bookdown.css', 'plugin-highlight.css',
-      'plugin-search.css', 'plugin-fontsettings.css'
+      'style.css', if (table_css) 'plugin-table.css', 'plugin-bookdown.css',
+      'plugin-highlight.css', 'plugin-search.css', 'plugin-fontsettings.css',
+      'plugin-clipboard.css'
     )),
     script = file.path('js', c(
-      app, 'lunr.js', 'plugin-search.js', 'plugin-sharing.js',
-      'plugin-fontsettings.js', 'plugin-bookdown.js', 'jquery.highlight.js'
+      app, 'lunr.js', 'clipboard.min.js', 'plugin-search.js', 'plugin-sharing.js',
+      'plugin-fontsettings.js', 'plugin-bookdown.js', 'jquery.highlight.js',
+      'plugin-clipboard.js'
     ))
   ))
 }
@@ -108,19 +121,26 @@ gitbook_page = function(
   foot = sub('<!--bookdown:link_prev-->', a_prev, foot)
   foot = sub('<!--bookdown:link_next-->', a_next, foot)
 
-  l_prev = if (has_prev) sprintf('<link rel="prev" href="%s">', link_prev) else ''
-  l_next = if (has_next) sprintf('<link rel="next" href="%s">', link_next) else ''
+  l_prev = if (has_prev) sprintf('<link rel="prev" href="%s"/>', link_prev) else ''
+  l_next = if (has_next) sprintf('<link rel="next" href="%s"/>', link_next) else ''
   head = sub('<!--bookdown:link_prev-->', l_prev, head)
   head = sub('<!--bookdown:link_next-->', l_next, head)
-  head = sub('<!--bookdown:version-->', packageVersion('bookdown'), head)
+  head = sub('#bookdown:version#', packageVersion('bookdown'), head)
 
   # gitbook JS scripts only work after the DOM has been loaded, so move them
   # from head to foot
   i = grep('^\\s*<script src=".+/gitbook([^/]+)?/js/[.a-z-]+[.]js"></script>\\s*$', head)
-  # it is probably a self-contained page, so look for base64 encoded scripts
-  if (length(i) == 0) i = grep(
-    '^\\s*<script src="data:application/x-javascript;base64,[^"]+"></script>\\s*$', head
-  )
+  # it is probably a self-contained page, so look for script node.
+  # from pandoc2, they are not always base64 encoded scripts, so start and end of scripts
+  # node must be found and moved.
+  if (length(i) == 0) {
+    s_start = grep(
+      '^\\s*<script( src="data:application/(x-)?javascript;base64,[^"]+")?>', head
+    )
+    s_end = grep("</script>\\s*$", head)
+    # find all lines to move
+    i = unlist(mapply(seq.int, s_start, s_end, SIMPLIFY = FALSE))
+  }
   s = head[i]; head[i] = ''
   j = grep('<!--bookdown:config-->', foot)[1]
   foot[j] = paste(c(s, foot[j]), collapse = '\n')
@@ -135,9 +155,12 @@ gitbook_page = function(
   }
 
   # you can set the edit setting in either _bookdown.yml or _output.yml
-  if (is.list(setting <- edit_setting(config$edit))) config$edit = setting
-  if (length(rmd_cur) && is.list(config$edit))
-    config$edit$link = sprintf(config$edit$link, rmd_cur)
+  for (type in c('edit', 'history', 'view')) {
+    if (is.list(setting <- source_link_setting(config[[type]], type = type)))
+      config[[type]] = setting
+    if (length(rmd_cur) && is.list(config[[type]]))
+      config[[type]][["link"]] = sprintf(config[[type]]$link, rmd_cur)
+  }
 
   config$download = download_filenames(config)
 
@@ -206,12 +229,14 @@ gitbook_toc = function(x, cur, config) {
 gitbook_config = function(config = list()) {
   default = list(
     sharing = list(
-      github = FALSE, facebook = TRUE, twitter = TRUE, google = FALSE,
-      linkedin = FALSE, weibo = FALSE, instapper = FALSE, vk = FALSE,
-      all = c('facebook', 'google', 'twitter', 'linkedin', 'weibo', 'instapaper')
+      github = FALSE, facebook = TRUE, twitter = TRUE,
+      linkedin = FALSE, weibo = FALSE, instapaper = FALSE, vk = FALSE,
+      all = c('facebook', 'twitter', 'linkedin', 'weibo', 'instapaper')
     ),
     fontsettings = list(theme = 'white', family = 'sans', size = 2),
     edit = list(link = NULL, text = NULL),
+    history = list(link = NULL, text = NULL),
+    view = list(link = NULL, text = NULL),
     download = NULL,
     # toolbar = list(position = 'static'),
     toc = list(collapse = 'subsection')
